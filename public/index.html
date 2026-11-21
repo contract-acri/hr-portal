@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACRI HR Portal · Facilitators</title>
+<link rel="icon" href="assets/acri.png">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div id="app"></div>
+
+<script src="config.js"></script>
+<script src="assets/app.js"></script>
+<script>
+(function () {
+  var H = window.HR, esc = H.esc, app = document.getElementById('app');
+  var KEY = 'acri_hr_fac';
+  var state = { token: sessionStorage.getItem(KEY), data: null };
+
+  function api(action, body) {
+    return H.call(Object.assign({ action: action, token: state.token }, body || {})).then(function (r) {
+      if (!r.ok && /log in|expired/i.test(r.error || '')) { logout(); }
+      if (r.ok && r.data) { state.data = r.data; render(); }
+      return r;
+    });
+  }
+  function logout() { if (state.token) H.call({ action: 'logout', token: state.token }); sessionStorage.removeItem(KEY); state = { token: null, data: null }; renderLogin(); }
+
+  function renderLogin(err) {
+    app.innerHTML = '<div class="login"><div class="box"><img src="assets/acri.png" alt="ACRI">' +
+      '<h1>ACRI HR Portal</h1><p class="lead">Facilitator login</p>' + (err ? '<div class="note err">' + esc(err) + '</div>' : '') +
+      '<form id="lf"><label class="f">Email<input class="i" name="email" type="email" required autocomplete="username"></label>' +
+      '<label class="f">Password<input class="i" name="password" type="password" required autocomplete="current-password"></label>' +
+      '<button class="btn" type="submit">Log in</button></form>' +
+      '<p class="small muted" style="text-align:center;margin:16px 0 0">Forgot your password? Write to <a href="mailto:president@acriindia.org">president@acriindia.org</a>.<br>ACRI staff: <a href="admin/">admin console</a></p></div></div>';
+    document.getElementById('lf').onsubmit = function (e) {
+      e.preventDefault(); var f = e.target, btn = f.querySelector('button'); btn.disabled = true; btn.textContent = 'Logging in…';
+      H.call({ action: 'login', email: f.email.value, password: f.password.value }).then(function (r) {
+        if (!r.ok) return renderLogin(r.error);
+        state.token = r.token; state.data = r.data; sessionStorage.setItem(KEY, r.token); render();
+      });
+    };
+  }
+
+  function rateText(p) {
+    if (p.pay_model === 'share') {
+      var m = p.share && p.share.mine;
+      if (!m) return 'Paid as a share of the ACRI Abhivyakti Fund';
+      return 'Your share: ' + m.share_pct + '% of the amount left after ACRI deductions · attended ' + m.attended + ' of ' + m.planned + ' planned sessions' +
+        (m.missed ? ' · ' + m.missed + ' missed (not paid)' : '') + (p.share.pool > 0 ? ' · earned so far ' + H.money(m.entitlement) : '') + (m.to_recover ? ' · advance still to recover ' + H.money(m.to_recover) : '');
+    }
+    if (p.session_net == null) return 'Rate to be finalised by ACRI';
+    return H.money(p.session_net) + ' per session attended';
+  }
+
+  function render() {
+    var d = state.data, me = d.me, t = d.totals;
+    var today = new Date().toISOString().slice(0, 10);
+    var progs = d.programmes.map(function (p) {
+      var fund = p.fund && p.fund.tracked ? '<div class="small muted" style="margin-top:8px">ACRI Abhivyakti Fund: received ' + H.money(p.fund.received) + ' · ACRI deductions ' + H.money(p.fund.deducted) + ' · facilitator pool ' + H.money(p.fund.pool) +
+        (p.fund.byHead.length ? '<br>Deductions: ' + p.fund.byHead.map(function (h) { return esc(h.head) + ' ' + H.money(h.amount); }).join(' · ') : '') + '</div>' : '';
+      return '<div style="padding:12px 18px;border-bottom:1px solid var(--line)"><b>' + esc(p.name) + '</b> <span class="muted">· ' + esc(p.school) + '</span><div class="small">' + esc(rateText(p)) + '</div>' + fund + '</div>';
+    }).join('');
+
+    var rows = d.sessions.map(function (s) {
+      var a = s.attendance, p = s.payment, act = '';
+      var canClaim = s.status !== 'cancelled' && s.date <= today && (!a || a.status === 'rejected');
+      if (canClaim) act = '<button class="btn sm" data-claim="' + s.id + '">Submit attendance</button>';
+      var note = (a && a.remarks ? '<div class="small muted">' + esc(a.remarks) + '</div>' : '') + (p && p.reason && p.status !== 'not_payable' ? '<div class="small muted">' + esc(p.reason) + '</div>' : '');
+      return '<tr><td><div class="small muted">' + esc((s.group || '').replace(/\s*\(.*\)/, '')) + '</div><b>' + esc(s.number) + '</b>' + (s.extra ? ' <span class="pill blue">Extra</span>' : '') + '</td><td>' + H.date(s.date) + '<div class="small muted">' + (s.time ? esc(s.time) + ' · ' : '') + esc(s.mode) + (s.status === 'cancelled' ? ' · cancelled' : '') + '</div></td>' +
+        '<td>' + (a ? H.pill(H.ATT, a.status) : (s.date > today ? '<span class="pill">Upcoming</span>' : '<span class="pill">Not recorded</span>')) + '</td>' +
+        '<td class="num">' + (p && ['not_payable', 'eligible', 'pro_bono'].indexOf(p.status) < 0 ? H.money(p.net) : '—') + '</td><td>' + (p ? H.pill(H.PAY, p.status) : '') + (p && p.paid_ref ? '<div class="small muted">Ref ' + esc(p.paid_ref) + '</div>' : '') + note + '</td><td>' + act + '</td></tr>';
+    }).join('');
+
+    var qs = d.queries.length ? d.queries.map(function (q) {
+      return '<div class="query"><b>' + esc(q.subject) + '</b> ' + (q.status === 'open' ? '<span class="pill amber">Open</span>' : '<span class="pill green">' + (q.status === 'closed' ? 'Closed' : 'Answered') + '</span>') +
+        '<div class="small muted">' + esc(q.created_at.slice(0, 10)) + '</div><div>' + esc(q.message) + '</div>' + (q.response ? '<div class="r"><b>ACRI:</b> ' + esc(q.response) + '</div>' : '') + '</div>';
+    }).join('') : '<div class="empty">No queries yet.</div>';
+
+    app.innerHTML = '<div class="topbar"><div class="in"><img src="assets/acri.png" alt="ACRI"><div class="t">ACRI HR Portal<small>Facilitator</small></div><div class="sp"></div>' +
+      '<div class="who"><b>' + esc(me.name) + '</b>' + esc(me.email) + '</div><button class="btn ghost sm" id="pw">Change password</button><button class="btn ghost sm" id="lo">Log out</button></div><div class="stripe"></div></div>' +
+      '<div class="wrap"><h1>Hello, ' + esc(me.name.split(' ')[0]) + '</h1><p class="lead">Your sessions, attendance and payments' + (me.appointment_ref ? ' · Appointment ' + esc(me.appointment_ref) : '') + '</p>' +
+      (me.must_change ? '<div class="note warn">Please set your own password before continuing. <button class="btn sm" id="pw2">Set password</button></div>' : '') +
+      '<div class="stats"><div class="stat"><div class="k">Sessions attended</div><div class="v">' + t.present + '</div><div class="s">' + t.absent + ' absent' + (t.proBono ? ' · ' + t.proBono + ' pro bono' : '') + '</div></div>' +
+      '<div class="stat hl"><div class="k">Paid to you</div><div class="v">' + H.money(t.paid) + '</div>' + (t.advance ? '<div class="s">includes ' + H.money(t.advance) + ' advance</div>' : '') + '</div>' +
+      '<div class="stat"><div class="k">Approved, to be paid</div><div class="v">' + H.money(t.approved) + '</div></div>' +
+      '<div class="stat"><div class="k">Pending</div><div class="v">' + H.money(t.pending) + '</div><div class="s">Awaiting approval or funds</div></div></div>' +
+      '<div class="card"><div class="hd"><h2>Your programmes</h2></div><div class="bd flush">' + (progs || '<div class="empty">No programmes assigned.</div>') + '</div></div>' +
+      '<div class="card"><div class="hd"><h2>Sessions and payments</h2><div class="sp"></div><span class="small muted">Missed sessions reduce your share</span></div><div class="bd flush scroll"><table class="t"><thead><tr><th>Session</th><th>Date</th><th>Attendance</th><th class="num">Amount</th><th>Payment</th><th></th></tr></thead><tbody>' +
+      (rows || '<tr><td colspan="6" class="empty">No sessions yet.</td></tr>') + '</tbody></table></div></div>' +
+      (d.payouts && d.payouts.length ? '<div class="card"><div class="hd"><h2>Payments from the ACRI Abhivyakti Fund</h2></div><div class="bd flush scroll"><table class="t"><thead><tr><th>Worked out on</th><th>How it was worked out</th><th class="num">Amount</th><th>Status</th></tr></thead><tbody>' +
+        d.payouts.map(function (o) { return '<tr><td>' + H.date((o.paid_on || o.created_at).slice(0, 10)) + '</td><td class="small">' + (o.kind === 'advance' ? '<span class="pill amber">Advance</span> ' + esc(o.basis) + '<div class="muted">Taken off your next session payments</div>' : esc(o.basis) + '<div class="muted">Share so far ' + H.money(o.entitlement) + ' − already paid ' + H.money(o.previous) + '</div>') + '</td><td class="num"><b>' + H.money(o.amount) + '</b></td><td>' + H.pill(H.PAYOUT, o.status) +
+          (o.reason ? '<div class="small muted">' + esc(o.reason) + '</div>' : '') + (o.paid_ref ? '<div class="small muted">Ref ' + esc(o.paid_ref) + ' · ' + esc(o.paid_on) + '</div>' : '') + '</td></tr>'; }).join('') + '</tbody></table></div></div>' : '') +
+      '<div class="card"><div class="hd"><h2>Queries</h2><div class="sp"></div><button class="btn sm" id="q">Ask ACRI</button></div><div class="bd flush">' + qs + '</div></div>' +
+      '<p class="small muted" style="text-align:center">Ahmedabad Centre for Research and Innovation · hr.acriindia.org.in</p></div>';
+
+    document.getElementById('lo').onclick = logout;
+    [document.getElementById('pw'), document.getElementById('pw2')].forEach(function (b) { if (b) b.onclick = changePw; });
+    document.getElementById('q').onclick = function () {
+      H.form('Ask ACRI', [{ name: 'subject', label: 'Subject', required: true }, { name: 'message', label: 'Your question', type: 'textarea', required: true }], 'Send',
+        function (v) { return api('raiseQuery', v).then(function (r) { if (r.ok) H.toast('Query sent. You will get an email when ACRI responds.'); return r; }); });
+    };
+    app.querySelectorAll('[data-claim]').forEach(function (b) {
+      b.onclick = function () {
+        var s = d.sessions.filter(function (x) { return x.id === b.dataset.claim; })[0];
+        H.form('Submit attendance · Session ' + s.number + ' (' + H.date(s.date) + ')', [{ name: 'note', label: 'Note for ACRI (optional)', type: 'textarea', help: 'For example, which group you took. ACRI verifies this against its records; any discrepancy means no payment for the session.' }], 'Submit',
+          function (v) { return api('claimAttendance', { session_id: s.id, note: v.note }).then(function (r) { if (r.ok) H.toast('Submitted for verification.'); return r; }); });
+      };
+    });
+  }
+
+  function changePw() {
+    H.form('Change password', [{ name: 'current', label: 'Current password', type: 'password', required: true }, { name: 'next', label: 'New password', type: 'password', help: 'At least 8 characters', required: true }, { name: 'again', label: 'Repeat new password', type: 'password', required: true }], 'Change',
+      function (v) { if (v.next !== v.again) return { ok: false, error: 'The new passwords do not match.' }; return api('changePassword', v).then(function (r) { if (r.ok) H.toast('Password changed.'); return r; }); });
+  }
+
+  if (state.token) api('dashboard').then(function (r) { if (!r.ok) renderLogin(); }); else renderLogin();
+})();
+</script>
+</body>
+</html>
