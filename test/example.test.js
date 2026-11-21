@@ -1,0 +1,33 @@
+
+const HRCore=require('../backend/Core.js');const assert=require('assert');
+const T={};Object.keys(HRCore.SCHEMA).forEach(n=>T[n]=[]);const key=n=>HRCore.SCHEMA[n][0];
+const S=(o,n)=>{const r={};HRCore.SCHEMA[n].forEach(h=>r[h]=o[h]==null?'':String(o[h]));return r;};
+const store={all:n=>T[n].map(r=>({...r})),find:(n,id)=>{const r=T[n].find(x=>x[key(n)]===String(id));return r?{...r}:null},insert:(n,o)=>T[n].push(S(o,n)),update:(n,id,p)=>{const r=T[n].find(x=>x[key(n)]===String(id));Object.assign(r,S({...r,...p},n))}};
+let now=new Date('2026-10-01');const mem={};let i=0;
+const core=HRCore.create({store,cache:{get:k=>mem[k]||null,put:(k,v)=>mem[k]=v,remove:k=>delete mem[k]},uid:()=>'i'+(++i),hash:(p,s)=>s+':'+p,mail:()=>{},now:()=>now});
+const ok=r=>{if(!r.ok)throw new Error(r.error);return r};
+store.insert('Admins',{id:'a',email:'vp',role:'vp',salt:'s',hash:'s:password1',active:'TRUE'});
+store.insert('Programmes',{id:'p',name:'Abhivyakti 2026–27',school:'Apple Global School',pay_model:'share',planned_sessions:25,status:'active'});
+store.insert('DeductionHeads',{id:'h',name:'H',active:'TRUE'});
+store.insert('Facilitators',{id:'F',name:'Fenil',email:'f@x',status:'active'});store.insert('Facilitators',{id:'Y',name:'Yashvi',email:'y@x',status:'active'});
+store.insert('Assignments',{id:'x1',programme_id:'p',facilitator_id:'F',status:'active'});store.insert('Assignments',{id:'x2',programme_id:'p',facilitator_id:'Y',status:'active'});
+const tok=ok(core.handle({action:'login',role:'admin',email:'vp',password:'password1'})).token;
+const yAbs=new Set([5,10,15,20,25]);const fAbs=new Set([25]);
+const run=(from,to)=>{for(let k=from;k<=to;k++){const d=new Date(Date.UTC(2026,9,1+k)).toISOString().slice(0,10);store.insert('Sessions',{id:'s'+k,programme_id:'p',number:k,date:d,status:'held'});
+ [['F',fAbs],['Y',yAbs]].forEach(([f,a])=>{const st=a.has(k)?'absent':'present';store.insert('Attendance',{id:'t'+k+f,session_id:'s'+k,facilitator_id:f,status:st});core.syncPayment(f,store.find('Sessions','s'+k),st);});} now=new Date(Date.UTC(2026,9,1+to));};
+const pay=()=>{const r=core.handle({action:'distributeFund',token:tok,programme_id:'p'});return ['F','Y'].map(f=>T.Payouts.filter(o=>o.facilitator_id===f).reduce((a,o)=>a+Number(o.amount),0));};
+run(1,10);ok(core.handle({action:'recordAdvance',token:tok,programme_id:'p',facilitator_id:'Y',amount:5000,date:'2026-10-11',reason:'Urgent need'}));
+run(11,15);ok(core.handle({action:'addFundEntry',token:tok,programme_id:'p',type:'credit',amount:72000,date:'2026-10-16'}));
+ok(core.handle({action:'addFundEntry',token:tok,programme_id:'p',type:'deduction',head:'H',amount:18000,date:'2026-10-16'}));
+ok(core.handle({action:'addFundEntry',token:tok,programme_id:'p',type:'deduction',head:'H',amount:4000,date:'2026-10-16'}));
+const a15=pay();console.log('after s15 (Yashvi total incl. 5000 advance)',a15);assert.deepEqual(a15,[15000,12000]);
+assert.equal(T.Payouts.filter(o=>o.facilitator_id==='Y'&&o.kind==='share')[0].amount,'7000');
+run(16,20);ok(core.handle({action:'addFundEntry',token:tok,programme_id:'p',type:'credit',amount:40000,date:'2026-10-21'}));
+ok(core.handle({action:'addFundEntry',token:tok,programme_id:'p',type:'deduction',head:'H',amount:10000,date:'2026-10-21'}));
+console.log('after s20',pay());
+run(21,25);const fin=pay();console.log('final',fin);
+assert.deepEqual(fin,[38400,32000]);
+// session email
+const ms=[];const c2=HRCore.create({store,cache:{get:k=>mem[k]||null,put:(k,v)=>mem[k]=v,remove:k=>delete mem[k]},uid:()=>'j'+(++i),hash:(p,s)=>s+':'+p,mail:(to,sub,html)=>ms.push([to,sub,html]),now:()=>now});
+ok(c2.handle({action:'saveSession',token:tok,programme_id:'p',number:'26',date:'2026-12-05',time:'9:00–10:00 AM',group:'Grades 9–12',mode:'online',venue:'Google Meet link',notify:true}));
+console.log(ms.length,'session emails:',ms[0][1]);require('fs').writeFileSync('/tmp/session_email.html',ms[0][2]);console.log('Example matches option 1b.');
