@@ -67,6 +67,9 @@
       var a = s.attendance, p = s.payment, act = '';
       var canClaim = s.status !== 'cancelled' && s.date <= today && (!a || a.status === 'rejected');
       if (canClaim) act = '<button class="btn sm" data-claim="' + s.id + '">Submit attendance</button>';
+      var canLeave = s.status !== 'cancelled' && !s.leave && (!a || a.status === 'absent' || a.status === 'rejected');
+      if (canLeave) act += ' <button class="btn sm ghost" data-leave="' + s.id + '">Apply for leave</button>';
+      if (s.leave && s.leave.status === 'pending') act += ' <span class="pill amber">Absence requested</span>';
       var note = (a && a.remarks ? '<div class="small muted">' + esc(a.remarks) + '</div>' : '') + (p && p.reason && p.status !== 'not_payable' ? '<div class="small muted">' + esc(p.reason) + '</div>' : '');
       return '<tr><td><div class="small muted">' + esc((s.group || '').replace(/\s*\(.*\)/, '')) + '</div><b>' + esc(s.number) + '</b>' + (s.extra ? ' <span class="pill blue">Extra</span>' : '') + '</td><td>' + H.date(s.date) + '<div class="small muted">' + (s.time ? esc(s.time) + ' · ' : '') + esc(s.mode) + (s.status === 'cancelled' ? ' · cancelled' : '') + '</div></td>' +
         '<td>' + (a ? H.pill(H.ATT, a.status) : (s.date > today ? '<span class="pill">Upcoming</span>' : '<span class="pill">Not recorded</span>')) + '</td>' +
@@ -84,7 +87,7 @@
       (me.must_change ? '<div class="note warn">Please set your own password before continuing. <button class="btn sm" id="pw2">Set password</button></div>' : '') +
       '<div class="stats"><div class="stat"><div class="k">Sessions attended</div><div class="v">' + t.present + '</div><div class="s">' + t.absent + ' absent' + (t.proBono ? ' · ' + t.proBono + ' pro bono' : '') + '</div></div>' +
       '<div class="stat hl"><div class="k">Paid to you</div><div class="v">' + H.money(t.paid) + '</div>' + (t.advance ? '<div class="s">includes ' + H.money(t.advance) + ' advance</div>' : '') + '</div>' +
-      '<div class="stat"><div class="k">Approved, to be paid</div><div class="v">' + H.money(t.approved) + '</div></div>' +
+      '<div class="stat"><div class="k">Paid leaves left</div><div class="v">' + (d.programmes[0] && d.programmes[0].paidLeave ? d.programmes[0].paidLeave.left + ' <span style="font-size:14px;color:var(--muted)">of ' + d.programmes[0].paidLeave.limit + '</span>' : '—') + '</div><div class="s">Approved, to be paid: ' + H.money(t.approved) + '</div></div>' +
       '<div class="stat"><div class="k">Pending</div><div class="v">' + H.money(t.pending) + '</div><div class="s">Awaiting approval or funds</div></div></div>' +
       '<div class="card"><div class="hd"><h2>Your programmes</h2></div><div class="bd flush">' + (progs || '<div class="empty">No programmes assigned.</div>') + '</div></div>' +
       '<div class="card"><div class="hd"><h2>Sessions and payments</h2><div class="sp"></div><span class="small muted">Missed sessions reduce your share</span></div><div class="bd flush scroll"><table class="t"><thead><tr><th>Session</th><th>Date</th><th>Attendance</th><th class="num">Amount</th><th>Payment</th><th></th></tr></thead><tbody>' +
@@ -92,6 +95,9 @@
       (d.payouts && d.payouts.length ? '<div class="card"><div class="hd"><h2>Payments from the ACRI Abhivyakti Fund</h2></div><div class="bd flush scroll"><table class="t"><thead><tr><th>Worked out on</th><th>How it was worked out</th><th class="num">Amount</th><th>Status</th></tr></thead><tbody>' +
         d.payouts.map(function (o) { return '<tr><td>' + H.date((o.paid_on || o.created_at).slice(0, 10)) + '</td><td class="small">' + (o.kind === 'advance' ? '<span class="pill amber">Advance</span> ' + esc(o.basis) + '<div class="muted">Taken off your next session payments</div>' : esc(o.basis) + '<div class="muted">Share so far ' + H.money(o.entitlement) + ' − already paid ' + H.money(o.previous) + '</div>') + '</td><td class="num"><b>' + H.money(o.amount) + '</b></td><td>' + H.pill(H.PAYOUT, o.status) +
           (o.reason ? '<div class="small muted">' + esc(o.reason) + '</div>' : '') + (o.paid_ref ? '<div class="small muted">Ref ' + esc(o.paid_ref) + ' · ' + esc(o.paid_on) + '</div>' : '') + '</td></tr>'; }).join('') + '</tbody></table></div></div>' : '') +
+      (d.leaves && d.leaves.length ? '<div class="card"><div class="hd"><h2>Leave requests</h2><div class="sp"></div><span class="small muted">Paid leaves are paid; unpaid absences are not</span></div><div class="bd flush scroll"><table class="t"><thead><tr><th>Session</th><th>Reason</th><th>Status</th><th></th></tr></thead><tbody>' +
+        d.leaves.map(function (l) { return '<tr><td>' + esc((l.group || '').replace(/\s*\(.*\)/, '')) + ' · Session ' + esc(l.number) + '<div class="small muted">' + H.date(l.date) + '</div></td><td class="small">' + esc(l.reason) + (l.remarks ? '<div class="muted">ACRI: ' + esc(l.remarks) + '</div>' : '') + '</td><td>' +
+          (l.paid ? '<span class="pill green">Paid leave</span> ' : '<span class="pill">Unpaid</span> ') + (l.status === 'pending' ? '<span class="pill amber">Pending</span>' : l.status === 'approved' ? '<span class="pill green">Approved</span>' : '<span class="pill red">Not approved</span>') + '</td><td>' + (l.has_proof ? '<button class="btn sm ghost" data-proof="' + l.id + '">View proof</button>' : '') + '</td></tr>'; }).join('') + '</tbody></table></div></div>' : '') +
       '<div class="card"><div class="hd"><h2>Queries</h2><div class="sp"></div><button class="btn sm" id="q">Ask ACRI</button></div><div class="bd flush">' + qs + '</div></div>' +
       '<p class="small muted" style="text-align:center">Ahmedabad Centre for Research and Innovation · hr.acriindia.org.in</p></div>';
 
@@ -101,6 +107,21 @@
       H.form('Ask ACRI', [{ name: 'subject', label: 'Subject', required: true }, { name: 'message', label: 'Your question', type: 'textarea', required: true }], 'Send',
         function (v) { return api('raiseQuery', v).then(function (r) { if (r.ok) H.toast('Query sent. You will get an email when ACRI responds.'); return r; }); });
     };
+    app.querySelectorAll('[data-leave]').forEach(function (b) {
+      b.onclick = function () {
+        var s = d.sessions.filter(function (x) { return x.id === b.dataset.leave; })[0];
+        var pl = (d.programmes.filter(function (p) { return p.id === s.programme_id; })[0] || {}).paidLeave || { left: 0, limit: 3 };
+        H.form('Apply for leave · ' + (s.group ? s.group.replace(/\s*\(.*\)/, '') + ' · ' : '') + 'Session ' + s.number + ' (' + H.date(s.date) + ')', [
+          { name: 'kind', label: 'Type of leave', type: 'select', options: (pl.left > 0 ? [['paid', 'Paid leave (' + pl.left + ' of ' + pl.limit + ' left)']] : []).concat([['unpaid', 'Unpaid authorised absence']]),
+            help: 'You have ' + pl.limit + ' paid leaves for the year. We recommend keeping them for your exams. When you are absent, ACRI has to arrange another facilitator or other cover, so please apply as early as possible.' },
+          { name: 'reason', label: 'Reason', type: 'textarea', required: true, help: 'For example: final exam.' },
+          { name: 'proof', label: 'Proof (optional)', type: 'file', help: 'A screenshot, photo or PDF, e.g. a letter from your examination coordinator' }], 'Apply',
+          function (v) { return api('applyLeave', { session_id: s.id, reason: v.reason, proof: v.proof, paid: v.kind === 'paid' }).then(function (r) { if (r.ok) H.toast('Request sent. You will get an email when ACRI decides.'); return r; }); });
+      };
+    });
+    app.querySelectorAll('[data-proof]').forEach(function (b) {
+      b.onclick = function () { H.call({ action: 'viewProof', token: state.token, leave_id: b.dataset.proof }).then(function (r) { if (r.ok) H.showProof(r.data.proof); else H.toast(r.error); }); };
+    });
     app.querySelectorAll('[data-claim]').forEach(function (b) {
       b.onclick = function () {
         var s = d.sessions.filter(function (x) { return x.id === b.dataset.claim; })[0];

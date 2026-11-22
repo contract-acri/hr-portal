@@ -70,7 +70,7 @@
   function render() {
     var x = d(), c = x.counts;
     if (!state.prog && x.programmes[0]) state.prog = x.programmes[0].id;
-    var badge = { attendance: c.claims, payments: c.pendingPay, queries: c.openQueries };
+    var badge = { attendance: c.claims + (c.leaveRequests || 0), payments: c.pendingPay, queries: c.openQueries };
     app.innerHTML = '<div class="topbar"><div class="in"><img src="../assets/acri.png" alt="ACRI"><div class="t">ACRI HR Portal<small>Admin console</small></div><div class="sp"></div>' +
       (x.programmes.length > 1 ? '<select class="i" id="ps" style="width:auto;margin:0">' + x.programmes.map(function (p) { return '<option value="' + p.id + '"' + (p.id === state.prog ? ' selected' : '') + '>' + esc(p.name) + '</option>'; }).join('') + '</select>' : '') +
       '<div class="who"><b>' + esc(x.me.name || '') + '</b>' + esc(ROLE[x.me.role] || '') + '</div><button class="btn ghost sm" id="lo">Log out</button></div><div class="stripe"></div></div>' +
@@ -118,11 +118,25 @@
         return '<td>' + (a ? H.pill(H.ATT, a.status) : '<span class="pill">—</span>') + (s.date <= today && s.status !== 'cancelled' ? ' <button class="btn sm ghost" data-mark="' + s.id + '|' + f.id + '">Set</button>' : '') + '</td>';
       }).join('') + '</tr>';
     });
-    return card('Submissions to verify', table(['Facilitator', 'Session', 'Note', 'Decision'], claims, 'No submissions waiting.')) +
+    var leaves = x.leaves.filter(function (l) { return l.programme_id === p.id; }).slice(0, 30).map(function (l) {
+      return '<tr><td><b>' + esc(l.facilitator) + '</b></td><td>' + esc((l.group || '').replace(/\s*\(.*\)/, '')) + ' · Session ' + esc(l.number) + '<div class="small muted">' + H.date(l.date) + '</div></td><td class="small">' + (l.paid ? '<span class="pill green">Paid leave</span> ' : '<span class="pill">Unpaid</span> ') + esc(l.reason) + (l.remarks ? '<div class="muted">' + esc(l.remarks) + '</div>' : '') +
+        '<div class="muted">Paid leaves used ' + l.balance.used + ' of ' + l.balance.limit + '</div></td><td>' +
+        (l.status === 'pending' ? '<span class="pill amber">Pending</span>' : l.status === 'approved' ? '<span class="pill green">Approved</span>' : '<span class="pill red">Rejected</span>') + '</td><td><div class="row-actions">' +
+        (l.has_proof ? '<button class="btn sm ghost" data-proof="' + l.id + '">View proof</button>' : '<span class="small muted">No proof</span>') +
+        (l.status === 'pending' ? (l.paid ? '<button class="btn sm ok" data-lv="approve" data-id="' + l.id + '">Approve as paid leave</button><button class="btn sm ghost" data-lv="approve_unpaid" data-id="' + l.id + '">Approve as unpaid</button>' : '<button class="btn sm ok" data-lv="approve" data-id="' + l.id + '">Approve (not paid)</button>') + '<button class="btn sm danger" data-lv="reject" data-id="' + l.id + '">Reject</button>' : '') + '</div></td></tr>';
+    });
+    return card('Leave requests', table(['Facilitator', 'Session', 'Reason', 'Status', 'Actions'], leaves, 'No requests.'), '<span class="small muted">Arrange cover for every approved leave</span>') +
+      card('Submissions to verify', table(['Facilitator', 'Session', 'Note', 'Decision'], claims, 'No submissions waiting.')) +
       card('Attendance register', table(['Group', 'Session', 'Date'].concat(facs.map(function (f) { return f.name; })), grid, 'No sessions yet.'), groupPicker(p));
   };
   BIND.attendance = function () {
     bindGroupPicker();
+    app.querySelectorAll('[data-proof]').forEach(function (b) { b.onclick = function () { H.call({ action: 'viewProof', token: state.token, leave_id: b.dataset.proof }).then(function (r) { if (r.ok) H.showProof(r.data.proof); else H.toast(r.error); }); }; });
+    app.querySelectorAll('[data-lv]').forEach(function (b) { b.onclick = function () {
+      var dec = b.dataset.lv;
+      H.form({ approve: 'Approve leave', approve_unpaid: 'Approve as unpaid absence', reject: 'Reject leave request' }[dec], [{ name: 'remarks', label: dec === 'reject' ? 'Reason' : 'Remarks (optional)', type: 'textarea', required: dec === 'reject' }], dec === 'reject' ? 'Reject' : 'Approve',
+        function (v) { return api('decideLeave', { leave_id: b.dataset.id, decision: dec, remarks: v.remarks }).then(function (r) { if (r.ok) H.toast('Done. The facilitator has been emailed.'); return r; }); });
+    }; });
     app.querySelectorAll('[data-v]').forEach(function (b) {
       b.onclick = function () {
         var dec = b.dataset.v;
@@ -134,7 +148,7 @@
     app.querySelectorAll('[data-mark]').forEach(function (b) {
       b.onclick = function () {
         var ids = b.dataset.mark.split('|');
-        H.form('Record attendance', [{ name: 'status', label: 'Status', type: 'select', options: [['present', 'Present'], ['absent', 'Absent (not paid)']] }, { name: 'remarks', label: 'Remarks', type: 'textarea' }, { name: 'notify', label: 'Email the facilitator', type: 'checkbox', value: true }], 'Save',
+        H.form('Record attendance', [{ name: 'status', label: 'Status', type: 'select', options: [['present', 'Present'], ['absent', 'Absent (not paid)'], ['leave', 'Authorised absence (not paid)'], ['paid_leave', 'Paid leave (uses 1 of the paid leaves)']] }, { name: 'remarks', label: 'Remarks', type: 'textarea' }, { name: 'notify', label: 'Email the facilitator', type: 'checkbox', value: true }], 'Save',
           function (v) { return api('markAttendance', { session_id: ids[0], facilitator_id: ids[1], status: v.status, remarks: v.remarks, notify: v.notify }); });
       };
     });
@@ -306,6 +320,7 @@
         { name: 'pool_per_student', label: 'Amount per student (₹)', type: 'number', value: p.pool_per_student, help: 'Used with "Per-student amount"' },
         { name: 'students', label: 'Students', type: 'number', value: p.students }, { name: 'planned_sessions', label: 'Planned sessions', type: 'number', value: p.planned_sessions, help: 'Change this if more sessions are added' },
         { name: 'acri_cut_pct', label: 'ACRI cut on each session (%)', type: 'number', step: '0.01', value: p.acri_cut_pct },
+        { name: 'paid_leaves', label: 'Paid leaves per facilitator', type: 'number', value: p.paid_leaves, help: 'Approved paid leaves count as attended sessions' },
         { name: 'groups', label: 'Groups (one per line)', type: 'textarea', value: (p.groups || []).join('\n'), help: 'Planned sessions are per group' },
         { name: 'recalculate', label: 'Recalculate open payments with these settings', type: 'checkbox', value: true }], 'Save',
         function (v) { return api('saveProgramme', Object.assign({ id: p.id }, v)).then(function (r) { if (r.ok) H.toast('Saved.'); return r; }); });
@@ -348,13 +363,19 @@
 
   VIEWS.team = function () {
     var x = d();
-    var rows = x.admins.map(function (a) { return '<tr><td><b>' + esc(a.name) + '</b><div class="small muted">' + esc(a.email) + '</div></td><td>' + esc(ROLE[a.role] || a.role) + '</td><td>' + (a.active === 'TRUE' ? '<span class="pill green">Active</span>' : '<span class="pill">Disabled</span>') + '</td></tr>'; });
+    var rows = x.admins.map(function (a) { return '<tr><td><b>' + esc(a.name) + '</b><div class="small muted">' + esc(a.email) + '</div></td><td>' + esc(ROLE[a.role] || a.role) + '</td><td>' + (a.active === 'TRUE' ? '<span class="pill green">Active</span>' : '<span class="pill">Disabled</span>') + '</td><td>' +
+      (x.me.isOwner && a.email !== x.me.email ? '<button class="btn sm ghost" data-apw="' + a.id + '">Send new password</button>' : '') + '</td></tr>'; });
     var set = x.settings.map(function (s) { return '<tr><td><b>' + esc(s.key) + '</b></td><td>' + esc(s.value) + '</td></tr>'; });
-    return card('Admin team', table(['Name', 'Role', 'Status'], rows), x.me.isOwner ? '<button class="btn sm" id="na">Add admin</button>' : '') +
+    return card('Admin team', table(['Name', 'Role', 'Status', ''], rows), x.me.isOwner ? '<button class="btn sm" id="na">Add admin</button>' : '') +
       card('Settings', table(['Key', 'Value'], set), '<button class="btn sm ghost" id="es">Edit settings</button><button class="btn sm ghost" id="cp">Change my password</button>');
   };
   BIND.team = function () {
     var x = d();
+    app.querySelectorAll('[data-apw]').forEach(function (b) { b.onclick = function () {
+      var a = x.admins.filter(function (y) { return y.id === b.dataset.apw; })[0];
+      H.form('Send new password to ' + a.name, [{ name: 'ok', label: 'Email a temporary password to ' + a.email + '. Their old password will stop working.', type: 'checkbox', value: true }], 'Send',
+        function (v) { if (!v.ok) return { ok: false, error: 'Tick the box to confirm.' }; return api('resetAdminPassword', { id: a.id }).then(function (r) { if (r.ok) H.toast('Temporary password emailed to ' + a.email + '.'); return r; }); });
+    }; });
     var na = document.getElementById('na');
     if (na) na.onclick = function () {
       H.form('Add admin', [{ name: 'name', label: 'Name', required: true }, { name: 'email', label: 'Email', type: 'email', required: true }, { name: 'role', label: 'Role', type: 'select', options: [['vp', 'Vice President (manages the fund)'], ['admin', 'Admin'], ['owner', 'Owner']] }], 'Add',

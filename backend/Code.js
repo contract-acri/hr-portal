@@ -217,9 +217,27 @@ function hash_(password, salt) {
   return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
 }
 
+// Proof files (absence screenshots) are kept private in a Drive folder owned by the script's account.
+function proofFolder_() {
+  var id = PROPS.getProperty('PROOF_FOLDER_ID');
+  if (id) { try { return DriveApp.getFolderById(id); } catch (e) {} }
+  var folder = DriveApp.createFolder('ACRI HR Portal – Absence Proofs');
+  PROPS.setProperty('PROOF_FOLDER_ID', folder.getId());
+  return folder;
+}
+function saveFile_(name, mime, base64) {
+  var blob = Utilities.newBlob(Utilities.base64Decode(base64), mime, name);
+  return proofFolder_().createFile(blob).getId();
+}
+function readFile_(id) {
+  return Utilities.base64Encode(DriveApp.getFileById(id).getBlob().getBytes());
+}
+
 function core_() {
   var cache = CacheService.getScriptCache();
   return HRCore.create({
+    saveFile: saveFile_,
+    readFile: readFile_,
     store: SheetStore_(),
     mail: zohoSend_,
     hash: hash_,
@@ -303,6 +321,7 @@ function setup() {
   }
 
   if (store.all('Programmes').length === 0) logins.push(seedAbhivyakti_(store, uid, now, tempPw()));
+  proofFolder_(); // creates the private Drive folder for absence proofs (and asks for Drive permission)
   var split = migrateGroups_(store, uid);
   if (split) Logger.log('Split ' + split + ' session(s) into one session per group. Check attendance per group in Admin → Attendance.');
 

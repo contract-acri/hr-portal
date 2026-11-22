@@ -12,7 +12,7 @@ var HRCore = (function () {
     Settings:     ['key', 'value'],
     Admins:       ['id', 'email', 'name', 'role', 'salt', 'hash', 'active', 'created_at'],
     Facilitators: ['id', 'name', 'email', 'phone', 'salt', 'hash', 'status', 'appointment_ref', 'appointed_on', 'must_change', 'created_at'],
-    Programmes:   ['id', 'name', 'school', 'students', 'pay_model', 'rate_per_session', 'pool_per_student', 'planned_sessions', 'acri_cut_pct', 'status', 'created_at', 'groups'],
+    Programmes:   ['id', 'name', 'school', 'students', 'pay_model', 'rate_per_session', 'pool_per_student', 'planned_sessions', 'acri_cut_pct', 'status', 'created_at', 'groups', 'paid_leaves'],
     Assignments:  ['id', 'programme_id', 'facilitator_id', 'role', 'from_date', 'status', 'share_pct', 'groups'],
     Sessions:     ['id', 'programme_id', 'number', 'date', 'group', 'mode', 'topic', 'status', 'extra', 'time', 'venue'],
     Attendance:   ['id', 'session_id', 'facilitator_id', 'status', 'claim_note', 'claimed_at', 'verified_by', 'verified_at', 'remarks'],
@@ -20,6 +20,7 @@ var HRCore = (function () {
     FundEntries:  ['id', 'programme_id', 'date', 'type', 'head', 'amount', 'note', 'recorded_by', 'created_at'],
     DeductionHeads: ['id', 'name', 'description', 'active'],
     Payouts:      ['id', 'programme_id', 'facilitator_id', 'created_at', 'sessions', 'per_session', 'entitlement', 'previous', 'amount', 'basis', 'status', 'reason', 'paid_ref', 'paid_on', 'updated_at', 'kind'],
+    Leaves:       ['id', 'programme_id', 'session_id', 'facilitator_id', 'reason', 'proof_id', 'proof_name', 'proof_mime', 'status', 'remarks', 'decided_by', 'decided_at', 'created_at', 'paid'],
     Queries:      ['id', 'facilitator_id', 'subject', 'message', 'status', 'response', 'created_at', 'updated_at'],
     EmailLog:     ['id', 'at', 'to', 'subject', 'status', 'error'],
     AuditLog:     ['id', 'at', 'actor', 'action', 'details']
@@ -33,7 +34,8 @@ var HRCore = (function () {
   var PAY_MODELS = ['share', 'tbd', 'per_session', 'pool', 'fund'];
   var PAYOUT_COUNTED = ['pending', 'approved', 'paid', 'withheld'];
   var FUND_ROLES = ['owner', 'vp'];
-  var ATT_STATUS = ['claimed', 'present', 'absent', 'rejected'];
+  var ATT_STATUS = ['claimed', 'present', 'absent', 'rejected', 'leave', 'paid_leave'];
+  var PAID_LEAVE_DEFAULT = 3;
   // Payment statuses an admin can set by hand.
   var PAY_SET = ['pending', 'approved', 'withheld', 'rejected', 'paid', 'pro_bono'];
   // Payments that use up money from the fund.
@@ -243,8 +245,8 @@ var HRCore = (function () {
       var existing = paymentFor(fid, session.id);
       if (existing && (existing.status === 'paid' || existing.status === 'approved')) return existing; // never silently undo
       var patch;
-      if (attStatus === 'present') patch = priceFor(prog, session, existing && existing.id);
-      else patch = { gross: 0, acri_cut: 0, net: 0, status: 'not_payable', reason: attStatus === 'absent' ? 'Session not attended' : 'Attendance not verified' };
+      if (attStatus === 'present' || attStatus === 'paid_leave') patch = priceFor(prog, session, existing && existing.id);
+      else patch = { gross: 0, acri_cut: 0, net: 0, status: 'not_payable', reason: attStatus === 'absent' ? 'Session not attended' : attStatus === 'leave' ? 'Authorised absence (not paid)' : 'Attendance not verified' };
       patch.updated_at = iso();
       if (existing) { store.update('Payments', existing.id, patch); return store.find('Payments', existing.id); }
       var row = Object.assign({ id: deps.uid(), facilitator_id: fid, session_id: session.id, programme_id: session.programme_id, paid_ref: '', paid_on: '' }, patch);
@@ -290,7 +292,7 @@ var HRCore = (function () {
         var heldIds = mine.map(function (x) { return x.id; });
         var divisor = Math.max(perGroup * (groups.length || 1), mine.length);
         var pct = str(a.share_pct) !== '' ? num(a.share_pct) : (unset ? Math.max(0, 100 - setPct) / unset : 0);
-        var attended = att.filter(function (x) { return x.facilitator_id === a.facilitator_id && x.status === 'present' && heldIds.indexOf(x.session_id) >= 0; }).length;
+        var attended = att.filter(function (x) { return x.facilitator_id === a.facilitator_id && (x.status === 'present' || x.status === 'paid_leave') && heldIds.indexOf(x.session_id) >= 0; }).length;
         // Count against the planned sessions (or more, if more were held), so money is released only as sessions are taken.
         var ratio = divisor ? attended / divisor : 0;
         var heldCount = mine.length;
@@ -307,9 +309,37 @@ var HRCore = (function () {
       return { pool: f.pool, held: held.length, planned: perGroup, lines: lines, totalPct: lines.reduce(function (t, l) { return t + l.share_pct; }, 0) };
     }
 
+    // ---------- authorised absence ----------
+    var PROOF_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    function saveProof(p, label) {
+      if (!p || !p.data) return { id: '', name: '', mime: '' };
+      if (!deps.saveFile) fail('File uploads are not set up on this server.');
+      var mime = str(p.mime).toLowerCase();
+      if (PROOF_TYPES.indexOf(mime) < 0) fail('Proof must be an image (JPG, PNG) or a PDF.');
+      if (str(p.data).length > 4 * 1024 * 1024 * 4 / 3) fail('The file is too large. Please keep it under 4 MB.');
+      var name = (label + '_' + str(p.name || 'proof')).replace(/[^\w.\-]+/g, '_').slice(0, 120);
+      return { id: deps.saveFile(name, mime, str(p.data)), name: str(p.name || name).slice(0, 120), mime: mime };
+    }
+    // Paid leaves: a set number per facilitator per programme (default 3). Approved ones are paid like attended sessions.
+    function paidLeaveInfo(progId, fid) {
+      var prog = store.find('Programmes', progId) || {};
+      var limit = str(prog.paid_leaves) === '' ? PAID_LEAVE_DEFAULT : num(prog.paid_leaves);
+      var sessIds = store.all('Sessions').filter(function (x) { return x.programme_id === progId; }).map(function (x) { return x.id; });
+      var used = store.all('Attendance').filter(function (a) { return a.facilitator_id === fid && a.status === 'paid_leave' && sessIds.indexOf(a.session_id) >= 0; }).length;
+      var pending = store.all('Leaves').filter(function (l) { return l.programme_id === progId && l.facilitator_id === fid && l.status === 'pending' && bool(l.paid); }).length;
+      return { limit: limit, used: used, pending: pending, left: Math.max(0, limit - used - pending) };
+    }
+    function leaveRows(filterFn) {
+      var facs = store.all('Facilitators'), sess = store.all('Sessions');
+      return store.all('Leaves').filter(filterFn).map(function (l) {
+        var f = facs.filter(function (x) { return x.id === l.facilitator_id; })[0] || {}, s = sess.filter(function (x) { return x.id === l.session_id; })[0] || {};
+        return Object.assign({}, l, { facilitator: f.name, date: s.date, number: s.number, group: s.group, has_proof: !!l.proof_id, paid: bool(l.paid), balance: paidLeaveInfo(l.programme_id, l.facilitator_id) });
+      }).sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; });
+    }
+
     // ---------- views ----------
     function publicFac(f) { return { id: f.id, name: f.name, email: f.email, phone: f.phone, status: f.status, appointment_ref: f.appointment_ref, appointed_on: f.appointed_on, must_change: bool(f.must_change) }; }
-    function publicProg(p) { var a = amounts(p); return { groups: progGroups(p), share: p.pay_model === 'share' ? shareCalc(p) : null, fund: fundSummary(p.id), id: p.id, name: p.name, school: p.school, students: num(p.students), pay_model: p.pay_model || 'tbd', rate_per_session: num(p.rate_per_session), pool_per_student: num(p.pool_per_student), planned_sessions: num(p.planned_sessions), acri_cut_pct: num(p.acri_cut_pct), status: p.status, session_gross: a.priced ? a.gross : null, session_net: a.priced ? a.net : null }; }
+    function publicProg(p) { var a = amounts(p); return { paid_leaves: str(p.paid_leaves) === '' ? PAID_LEAVE_DEFAULT : num(p.paid_leaves), groups: progGroups(p), share: p.pay_model === 'share' ? shareCalc(p) : null, fund: fundSummary(p.id), id: p.id, name: p.name, school: p.school, students: num(p.students), pay_model: p.pay_model || 'tbd', rate_per_session: num(p.rate_per_session), pool_per_student: num(p.pool_per_student), planned_sessions: num(p.planned_sessions), acri_cut_pct: num(p.acri_cut_pct), status: p.status, session_gross: a.priced ? a.gross : null, session_net: a.priced ? a.net : null }; }
 
     function facilitatorView(fid) {
       var f = store.find('Facilitators', fid);
@@ -320,6 +350,7 @@ var HRCore = (function () {
       myAssigns.forEach(function (a) { groupsFor[a.programme_id] = facGroups(a, store.find('Programmes', a.programme_id)); });
       var showFund = setting('SHOW_FUND_TO_FACILITATORS', 'TRUE').toUpperCase() !== 'FALSE';
       var programmes = store.all('Programmes').filter(function (p) { return progIds.indexOf(p.id) >= 0; }).map(publicProg)
+        .map(function (p) { p.paidLeave = paidLeaveInfo(p.id, fid); return p; })
         .map(function (p) { if (p.share) p.share = { pool: p.share.pool, held: p.share.held, mine: p.share.lines.filter(function (l) { return l.facilitator_id === fid; })[0] || null };
           if (!showFund) delete p.fund; else p.fund = { tracked: p.fund.tracked, received: p.fund.received, deducted: p.fund.deducted, byHead: p.fund.byHead, pool: p.fund.pool }; return p; });
       var att = store.all('Attendance').filter(function (a) { return a.facilitator_id === fid; });
@@ -331,6 +362,7 @@ var HRCore = (function () {
           var p = pays.filter(function (x) { return x.session_id === s.id; })[0];
           return { id: s.id, programme_id: s.programme_id, number: s.number, date: s.date, group: s.group, mode: s.mode, topic: s.topic, status: s.status, extra: bool(s.extra), time: s.time, venue: s.venue,
             attendance: a ? { status: a.status, remarks: a.remarks, claim_note: a.claim_note } : null,
+            leave: (function () { var l = store.all('Leaves').filter(function (x) { return x.session_id === s.id && x.facilitator_id === fid && x.status !== 'rejected'; })[0]; return l ? { id: l.id, status: l.status } : null; })(),
             payment: p ? { id: p.id, gross: p.gross, acri_cut: p.acri_cut, net: p.net, status: p.status, reason: p.reason, paid_ref: p.paid_ref, paid_on: p.paid_on } : null };
         });
       var totals = { paid: 0, approved: 0, pending: 0, present: 0, absent: 0, proBono: 0 };
@@ -351,7 +383,8 @@ var HRCore = (function () {
         if (o.status === 'pending') totals.pending += num(o.amount);
       });
       var queries = store.all('Queries').filter(function (q) { return q.facilitator_id === fid; }).sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; });
-      return { me: publicFac(f), programmes: programmes, sessions: sessions, totals: totals, payouts: payouts, queries: queries };
+      var leaves = leaveRows(function (l) { return l.facilitator_id === fid; });
+      return { me: publicFac(f), programmes: programmes, sessions: sessions, totals: totals, payouts: payouts, queries: queries, leaves: leaves };
     }
 
     function adminView(u) {
@@ -372,6 +405,7 @@ var HRCore = (function () {
         sessions: sess.slice().sort(function (a, b) { return str(a.date) < str(b.date) ? -1 : 1; }),
         attendance: att.map(function (a) { var s = sessOf(a.session_id); return Object.assign({}, a, { facilitator: nameOf(a.facilitator_id), date: s.date, number: s.number, group: s.group }); }),
         payments: pays.map(function (p) { var s = sessOf(p.session_id); return Object.assign({}, p, { facilitator: nameOf(p.facilitator_id), date: s.date, number: s.number, group: s.group }); }),
+        leaves: leaveRows(function () { return true; }),
         payouts: store.all('Payouts').map(function (o) { return Object.assign({}, o, { facilitator: nameOf(o.facilitator_id) }); }).sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; }),
         queries: qs.map(function (q) { return Object.assign({}, q, { facilitator: nameOf(q.facilitator_id) }); }).sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; }),
         emails: store.all('EmailLog').slice(-50).reverse(),
@@ -379,7 +413,8 @@ var HRCore = (function () {
           claims: att.filter(function (a) { return a.status === 'claimed'; }).length,
           pendingPay: pays.filter(function (p) { return p.status === 'pending'; }).length + store.all('Payouts').filter(function (o) { return o.status === 'pending'; }).length,
           awaitingFunds: pays.filter(function (p) { return p.status === 'awaiting_funds'; }).length,
-          openQueries: qs.filter(function (q) { return q.status === 'open'; }).length
+          openQueries: qs.filter(function (q) { return q.status === 'open'; }).length,
+          leaveRequests: store.all('Leaves').filter(function (l) { return l.status === 'pending'; }).length
         }
       };
     }
@@ -406,6 +441,41 @@ var HRCore = (function () {
           '<b>' + esc(f.name) + '</b> submitted attendance for Session ' + esc(s.number) + ' on ' + esc(s.date) + '.' + (row.claim_note ? '<br>Note: ' + esc(row.claim_note) : ''));
         audit(u.email, 'claimAttendance', { session: s.id });
         return facilitatorView(u.id);
+      },
+
+      applyLeave: function (u, b) {
+        need(b, ['session_id', 'reason']);
+        var s = store.find('Sessions', b.session_id); if (!s) fail('Session not found.');
+        var myA = store.all('Assignments').filter(function (a) { return a.facilitator_id === u.id && a.programme_id === s.programme_id && a.status !== 'ended'; })[0];
+        if (!myA) fail('You are not assigned to this programme.');
+        var att = store.all('Attendance').filter(function (a) { return a.session_id === s.id && a.facilitator_id === u.id; })[0];
+        if (att && ['present', 'claimed', 'leave'].indexOf(att.status) >= 0) fail('Attendance for this session is already ' + (att.status === 'leave' ? 'an authorised absence' : att.status) + '.');
+        var open = store.all('Leaves').filter(function (l) { return l.session_id === s.id && l.facilitator_id === u.id && l.status === 'pending'; })[0];
+        if (open) fail('You have already applied for this session. ACRI will respond soon.');
+        var f = store.find('Facilitators', u.id);
+        var wantPaid = b.paid === true || b.paid === 'TRUE' || b.paid === 'true';
+        var bal = paidLeaveInfo(s.programme_id, u.id);
+        if (wantPaid && bal.left <= 0) fail('You have no paid leaves left (' + bal.limit + ' per programme). You can still apply for an unpaid authorised absence.');
+        var proof = saveProof(b.proof, 'leave_' + s.date + '_' + f.name);
+        var row = { id: deps.uid(), programme_id: s.programme_id, session_id: s.id, facilitator_id: u.id, reason: str(b.reason).slice(0, 1000), proof_id: proof.id, proof_name: proof.name, proof_mime: proof.mime, status: 'pending', remarks: '', decided_by: '', decided_at: '', created_at: iso(), paid: wantPaid ? 'TRUE' : 'FALSE' };
+        store.insert('Leaves', row);
+        var label = (s.group ? s.group + ' · ' : '') + 'Session ' + s.number + ' (' + s.date + ')';
+        notifyAdmins((wantPaid ? 'Paid leave' : 'Authorised absence') + ' request: ' + f.name + ' · ' + label, (wantPaid ? 'Paid leave' : 'Authorised absence') + ' request',
+          '<b>' + esc(f.name) + '</b> has applied for ' + (wantPaid ? 'a <b>paid leave</b>' : 'an authorised absence') + ' for ' + esc(label) + '.<br>Reason: ' + esc(row.reason) + (proof.id ? '<br>Proof attached (view it in Admin → Attendance).' : '') +
+          '<br><br>Please arrange another facilitator or other cover for this session.');
+        send(f.email, 'Absence request received: ' + label, 'Absence request received',
+          'Hi ' + esc(f.name) + ',<br>ACRI has received your request for ' + (wantPaid ? 'a <b>paid leave</b>' : 'an authorised absence') + ' for <b>' + esc(label) + '</b>. You will get an email when it is decided.<br><br>' +
+          (wantPaid ? 'If approved, this session is paid and uses 1 of your ' + bal.limit + ' paid leaves (' + (bal.left - 1) + ' would be left).' : 'Please note: an unpaid authorised absence is <b>not paid</b>, as remuneration is based on sessions attended.') +
+          '<br>When you are absent, ACRI has to arrange another facilitator or other cover for the students, so please apply as early as possible.');
+        audit(u.email, 'applyLeave', { session: s.id });
+        return facilitatorView(u.id);
+      },
+
+      viewProof: function (u, b) {
+        need(b, ['leave_id']);
+        var l = store.find('Leaves', b.leave_id); if (!l || l.facilitator_id !== u.id) fail('Not found.');
+        if (!l.proof_id || !deps.readFile) fail('No proof attached.');
+        return Object.assign(facilitatorView(u.id), { proof: { mime: l.proof_mime, name: l.proof_name, data: deps.readFile(l.proof_id) } });
       },
 
       raiseQuery: function (u, b) {
@@ -492,7 +562,7 @@ var HRCore = (function () {
         need(b, ['name']);
         if (b.pay_model && PAY_MODELS.indexOf(b.pay_model) < 0) fail('Unknown payment model.');
         var cut = num(b.acri_cut_pct); if (cut < 0 || cut > 100) fail('ACRI cut must be between 0 and 100%.');
-        var data = { name: str(b.name), school: str(b.school), students: num(b.students), pay_model: b.pay_model || 'tbd', rate_per_session: num(b.rate_per_session), pool_per_student: num(b.pool_per_student), planned_sessions: num(b.planned_sessions), acri_cut_pct: cut, status: b.status || 'active', groups: splitList(b.groups).join('|') };
+        var data = { name: str(b.name), school: str(b.school), students: num(b.students), pay_model: b.pay_model || 'tbd', rate_per_session: num(b.rate_per_session), pool_per_student: num(b.pool_per_student), planned_sessions: num(b.planned_sessions), acri_cut_pct: cut, status: b.status || 'active', groups: splitList(b.groups).join('|'), paid_leaves: str(b.paid_leaves) === '' ? PAID_LEAVE_DEFAULT : Math.max(0, Math.floor(num(b.paid_leaves))) };
         var id = b.id;
         if (id) store.update('Programmes', id, data); else { id = deps.uid(); store.insert('Programmes', Object.assign({ id: id, created_at: iso() }, data)); }
         audit(u.email, 'saveProgramme', { id: id });
@@ -517,10 +587,11 @@ var HRCore = (function () {
       // Admin records or overrides attendance directly (present / absent).
       markAttendance: function (u, b) {
         need(b, ['session_id', 'facilitator_id', 'status']);
-        if (['present', 'absent'].indexOf(b.status) < 0) fail('Status must be present or absent.');
+        if (['present', 'absent', 'leave', 'paid_leave'].indexOf(b.status) < 0) fail('Status must be present, absent, authorised absence or paid leave.');
         var s = store.find('Sessions', b.session_id); if (!s) fail('Session not found.');
         var f = store.find('Facilitators', b.facilitator_id); if (!f) fail('Facilitator not found.');
         var existing = store.all('Attendance').filter(function (a) { return a.session_id === s.id && a.facilitator_id === f.id; })[0];
+        if (b.status === 'paid_leave' && (!existing || existing.status !== 'paid_leave') && paidLeaveInfo(s.programme_id, f.id).used >= paidLeaveInfo(s.programme_id, f.id).limit) fail(f.name + ' has no paid leaves left.');
         var patch = { status: b.status, verified_by: u.email, verified_at: iso(), remarks: str(b.remarks) };
         if (existing) store.update('Attendance', existing.id, patch);
         else store.insert('Attendance', Object.assign({ id: deps.uid(), session_id: s.id, facilitator_id: f.id, claim_note: '', claimed_at: '' }, patch));
@@ -610,6 +681,57 @@ var HRCore = (function () {
           'Hi ' + esc(f.name) + ',<br>ACRI has issued you an advance of <b>' + money(amt) + '</b> on ' + esc(fmtDate(b.date)) + '.' + (str(b.reason) ? '<br>Reason: ' + esc(b.reason) : '') + (str(b.paid_ref) ? '<br>Reference: ' + esc(b.paid_ref) : '') +
           '<br><br>This amount will be <b>adjusted automatically from your next session payments</b> until it is fully recovered. You can see it on the HR Portal.');
         audit(u.email, 'recordAdvance', { facilitator: f.id, amount: amt });
+        return adminView(u);
+      },
+
+      decideLeave: function (u, b) {
+        need(b, ['leave_id', 'decision']);
+        var l = store.find('Leaves', b.leave_id); if (!l) fail('Request not found.');
+        if (l.status !== 'pending') fail('This request is already ' + l.status + '.');
+        if (['approve', 'approve_unpaid', 'reject'].indexOf(b.decision) < 0) fail('Decision must be approve, approve_unpaid or reject.');
+        var asPaid = b.decision === 'approve' && bool(l.paid);
+        if (b.decision === 'approve_unpaid') b.decision = 'approve';
+        if (b.decision === 'reject' && !str(b.remarks)) fail('Please give a reason for rejecting.');
+        var s = store.find('Sessions', l.session_id), f = store.find('Facilitators', l.facilitator_id);
+        if (asPaid && paidLeaveInfo(l.programme_id, l.facilitator_id).used >= paidLeaveInfo(l.programme_id, l.facilitator_id).limit) fail('This facilitator has no paid leaves left. Approve it as unpaid instead.');
+        store.update('Leaves', l.id, { status: b.decision === 'approve' ? 'approved' : 'rejected', remarks: str(b.remarks), decided_by: u.email, decided_at: iso(), paid: asPaid ? 'TRUE' : 'FALSE' });
+        if (b.decision === 'approve') {
+          var att = store.all('Attendance').filter(function (a) { return a.session_id === s.id && a.facilitator_id === f.id; })[0];
+          var patch = { status: asPaid ? 'paid_leave' : 'leave', verified_by: u.email, verified_at: iso(), remarks: (asPaid ? 'Paid leave: ' : 'Authorised absence: ') + l.reason.slice(0, 200) };
+          if (att) store.update('Attendance', att.id, patch); else store.insert('Attendance', Object.assign({ id: deps.uid(), session_id: s.id, facilitator_id: f.id, claim_note: '', claimed_at: '' }, patch));
+          syncPayment(f.id, s, asPaid ? 'paid_leave' : 'leave');
+        }
+        var label = (s.group ? s.group + ' · ' : '') + 'Session ' + s.number + ' (' + s.date + ')';
+        var kind = asPaid ? 'Paid leave' : 'Absence request';
+        send(f.email, kind + ' ' + (b.decision === 'approve' ? 'approved' : 'not approved') + ': ' + label, kind + ' ' + (b.decision === 'approve' ? 'approved' : 'not approved'),
+          'Hi ' + esc(f.name) + ',<br>Your request for an authorised absence for <b>' + esc(label) + '</b> has been <b>' + (b.decision === 'approve' ? 'approved' : 'not approved') + '</b>.' +
+          (b.decision !== 'approve' ? '<br>Please attend the session as scheduled, or it will be recorded as absent.' :
+            asPaid ? '<br>It is recorded as a <b>paid leave</b>, so this session is paid. You have ' + paidLeaveInfo(l.programme_id, f.id).left + ' paid leave(s) left.' :
+            '<br>It is recorded as an authorised absence, so it is not counted as an unexcused absence. As per the Facilitator Rules, it is <b>not paid</b>.') +
+          (str(b.remarks) ? '<br>Remarks: ' + esc(b.remarks) : ''));
+        audit(u.email, 'decideLeave', b);
+        return adminView(u);
+      },
+
+      viewProof: function (u, b) {
+        need(b, ['leave_id']);
+        var l = store.find('Leaves', b.leave_id); if (!l) fail('Not found.');
+        if (!l.proof_id || !deps.readFile) fail('No proof attached.');
+        return Object.assign(adminView(u), { proof: { mime: l.proof_mime, name: l.proof_name, data: deps.readFile(l.proof_id) } });
+      },
+
+      resetAdminPassword: function (u, b) {
+        if (u.role !== 'owner') fail('Only the portal owner can reset admin passwords.');
+        need(b, ['id']);
+        var a = store.find('Admins', b.id); if (!a) fail('Admin not found.');
+        if (a.id === u.id) fail('Use "Change my password" for your own account.');
+        var pw = tempPassword();
+        setPw('Admins', a.id, pw);
+        store.update('Admins', a.id, { active: 'TRUE' });
+        send(a.email, 'Your ACRI HR Portal admin password', 'Your temporary admin password',
+          'Hi ' + esc(a.name) + ',<br>A temporary password has been set for your <b>' + esc(roleName(a.role)) + '</b> account on the ACRI HR Portal.<br><br>Email: <b>' + esc(a.email) + '</b><br>Temporary password: <b>' + esc(pw) + '</b>' +
+          '<br><br>Log in at <b>' + esc(setting('PORTAL_URL', 'https://hr.acriindia.org.in')) + '/admin</b>, then go to Team &amp; Settings → Change my password.');
+        audit(u.email, 'resetAdminPassword', { id: a.id });
         return adminView(u);
       },
 
